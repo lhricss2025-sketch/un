@@ -27,8 +27,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 # ============================================================
 
 # Telegram Bot Configuration
-TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # ← Get from @BotFather
-ADMIN_CHAT_ID = "YOUR_CHAT_ID_HERE"        # ← Your Telegram chat ID
+TELEGRAM_BOT_TOKEN = "8405170898:AAGc3WB4Hulq-X8YVFdqmXYUay7ccZGSaoc"  # ← Get from @BotFather
+ADMIN_CHAT_ID = "6070145287"        # ← Your Telegram chat ID
 
 # Gmail Accounts (7 accounts)
 GMAIL_ACCOUNTS = [
