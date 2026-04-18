@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-WhatsApp Unban Email Bot - Telegram Controlled
-Deployable on Railway.com
-Sends emails from 7 Gmail accounts to WhatsApp support
+WhatsApp Unban Email Bot - Telegram Controlled (Polling Mode)
+Railway.com Deployment Ready
 """
 
 import os
@@ -17,18 +16,19 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from typing import List, Dict, Tuple
 from flask import Flask, request
+import asyncio
 
-# Telegram Bot
-from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+# Telegram Bot - Polling Mode
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
 # ============================================================
 # CONFIGURATION - EDIT THESE
 # ============================================================
 
 # Telegram Bot Configuration
-TELEGRAM_BOT_TOKEN = "8405170898:AAGc3WB4Hulq-X8YVFdqmXYUay7ccZGSaoc"  # ← Get from @BotFather
-ADMIN_CHAT_ID = "6070145287"        # ← Your Telegram chat ID
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "YOUR_CHAT_ID_HERE")
 
 # Gmail Accounts (7 accounts)
 GMAIL_ACCOUNTS = [
@@ -59,7 +59,7 @@ TARGET_EMAILS = [
     "trademark@whatsapp.com",
 ]
 
-# Test email (where to send test emails - your email)
+# Test email
 TEST_EMAIL = "senzo23456@gmail.com"
 
 # Email Templates (5 templates)
@@ -158,13 +158,13 @@ WhatsApp User"""
     }
 ]
 
-# Template rotation pattern (15 emails per account)
+# Template rotation pattern
 TEMPLATE_PATTERN = [1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5]
 
-# Email sending configuration
+# Email configuration
 EMAIL_CONFIG = {
-    "delay_between_emails": 5,      # seconds
-    "delay_between_accounts": 5,    # seconds
+    "delay_between_emails": 5,
+    "delay_between_accounts": 5,
     "max_emails_per_account": 15,
     "smtp_server": "smtp.gmail.com",
     "smtp_port": 587,
@@ -176,25 +176,21 @@ EMAIL_CONFIG = {
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('bot.log'),
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# FLASK APP FOR RAILWAY
+# FLASK APP FOR RAILWAY (Health Check)
 # ============================================================
 
-app = Flask(__name__)
+flask_app = Flask(__name__)
 
-@app.route('/')
+@flask_app.route('/')
 def home():
-    return "WhatsApp Unban Bot is running!"
+    return "WhatsApp Unban Bot is running! (Polling Mode)"
 
-@app.route('/health')
+@flask_app.route('/health')
 def health():
     return "OK", 200
 
@@ -203,16 +199,13 @@ def health():
 # ============================================================
 
 class WhatsAppEmailSender:
-    """Main email sending class"""
-    
     def __init__(self):
         self.phone_number = None
         self.sent_count = 0
         self.failed_count = 0
         self.results = []
     
-    def send_email(self, account: Dict, to_email: str, template_id: int, index: int) -> Tuple[bool, str]:
-        """Send a single email"""
+    def send_email(self, account: Dict, to_email: str, template_id: int) -> Tuple[bool, str]:
         try:
             template = TEMPLATES[template_id - 1]
             body = template["body"].replace("{phone_number}", self.phone_number)
@@ -239,7 +232,6 @@ class WhatsAppEmailSender:
             return False, error_msg
     
     def run_campaign(self, progress_callback=None):
-        """Execute the full email campaign"""
         self.sent_count = 0
         self.failed_count = 0
         self.results = []
@@ -259,9 +251,9 @@ class WhatsAppEmailSender:
                 email_counter += 1
                 to_email = TARGET_EMAILS[target_idx] if target_idx < len(TARGET_EMAILS) else TEST_EMAIL
                 template_id = TEMPLATE_PATTERN[target_idx]
-                is_test = (target_idx == 14)  # 15th email is test
+                is_test = (target_idx == 14)
                 
-                success, message = self.send_email(account, to_email, template_id, target_idx)
+                success, message = self.send_email(account, to_email, template_id)
                 
                 if success:
                     self.sent_count += 1
@@ -277,38 +269,39 @@ class WhatsAppEmailSender:
                     "is_test": is_test
                 })
                 
-                progress = (email_counter / total_emails) * 100
-                
                 if progress_callback:
                     progress_callback(email_counter, total_emails, to_email, success, is_test)
                 
-                # Delay between emails
                 if target_idx < EMAIL_CONFIG["max_emails_per_account"] - 1:
                     time.sleep(EMAIL_CONFIG["delay_between_emails"])
             
             self.results.append(account_result)
             
-            # Delay between accounts
             if acc_idx < len(GMAIL_ACCOUNTS) - 1:
                 time.sleep(EMAIL_CONFIG["delay_between_accounts"])
         
         return {
             "total_sent": self.sent_count,
             "total_failed": self.failed_count,
-            "success_rate": (self.sent_count / (self.sent_count + self.failed_count)) * 100,
+            "success_rate": (self.sent_count / (self.sent_count + self.failed_count)) * 100 if (self.sent_count + self.failed_count) > 0 else 0,
             "results": self.results
         }
 
 # ============================================================
-# TELEGRAM BOT HANDLERS
+# TELEGRAM BOT HANDLERS (POLLING MODE)
 # ============================================================
 
-# Store user states
+# User sessions
 user_sessions = {}
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Conversation states
+PHONE_NUMBER, CONFIRMATION = range(2)
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
     user_id = str(update.effective_user.id)
+    
+    logger.info(f"Start command received from user: {user_id}")
     
     # Check if user is admin
     if user_id != ADMIN_CHAT_ID:
@@ -349,7 +342,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     await update.message.reply_text(
-        "✅ *Bot Status:* Running\n\n"
+        "✅ *Bot Status:* Running (Polling Mode)\n\n"
         f"📧 *Gmail Accounts:* {len(GMAIL_ACCOUNTS)}\n"
         f"📨 *Target Emails:* {len(TARGET_EMAILS)} WhatsApp addresses + 1 test\n"
         f"📝 *Templates:* {len(TEMPLATES)}\n"
@@ -359,7 +352,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /unban command - ask for phone number"""
+    """Handle /unban command"""
     user_id = str(update.effective_user.id)
     
     if user_id != ADMIN_CHAT_ID:
@@ -414,7 +407,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Store phone number
         user_sessions[user_id]["phone_number"] = phone_number
         user_sessions[user_id]["state"] = "confirm"
         
@@ -440,43 +432,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Start email sending in background
             threading.Thread(target=run_email_campaign, args=(update, context, user_sessions[user_id]["phone_number"])).start()
             
-            # Clear session
             del user_sessions[user_id]
         else:
             await update.message.reply_text("❌ Cancelled. Send /unban to start over.")
             del user_sessions[user_id]
 
-async def run_email_campaign(update: Update, context: ContextTypes.DEFAULT_TYPE, phone_number: str):
-    """Run the email campaign and send updates to Telegram"""
+def run_email_campaign(update: Update, context: ContextTypes.DEFAULT_TYPE, phone_number: str):
+    """Run email campaign in background"""
+    import asyncio
+    
     sender = WhatsAppEmailSender()
     sender.phone_number = phone_number
     
-    # Send initial message
-    await context.bot.send_message(
-        chat_id=ADMIN_CHAT_ID,
-        text=f"📧 *Email Campaign Started*\n\n📱 Phone: `{phone_number}`\n⏱️ Estimated time: 10-15 minutes\n\nSending emails...",
-        parse_mode="Markdown"
-    )
+    async def send_update(text):
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text, parse_mode="Markdown")
     
-    # Progress counter
-    last_update = {"count": 0}
+    # Send initial message
+    try:
+        asyncio.run(send_update(f"📧 *Email Campaign Started*\n\n📱 Phone: `{phone_number}`\n⏱️ Estimated time: 10-15 minutes\n\nSending emails..."))
+    except:
+        pass
     
     def progress_callback(current, total, to_email, success, is_test):
-        # Send update every 15 emails (every account)
         if current % 15 == 0 or current == total:
             percent = (current / total) * 100
-            # Use asyncio to send message
-            import asyncio
             try:
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(
-                    context.bot.send_message(
-                        chat_id=ADMIN_CHAT_ID,
-                        text=f"📊 *Progress:* {percent:.1f}% ({current}/{total})\n✅ Sent: {sender.sent_count}\n❌ Failed: {sender.failed_count}",
-                        parse_mode="Markdown"
-                    )
-                )
-                loop.close()
+                asyncio.run(send_update(f"📊 *Progress:* {percent:.1f}% ({current}/{total})\n✅ Sent: {sender.sent_count}\n❌ Failed: {sender.failed_count}"))
             except:
                 pass
     
@@ -492,53 +473,55 @@ async def run_email_campaign(update: Update, context: ContextTypes.DEFAULT_TYPE,
     report += f"📧 *Test emails:* You should receive {len(GMAIL_ACCOUNTS)} test emails at `{TEST_EMAIL}`\n\n"
     report += f"⚠️ Check your spam folder if you don't see them."
     
-    # Send detailed report per account
     report += "\n\n📋 *Per Account Summary:*\n"
     for acc_result in result['results']:
         status = "✅" if acc_result['failed'] == 0 else "⚠️"
         report += f"{status} {acc_result['account'][:20]}...: {acc_result['sent']}/15 sent\n"
     
-    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=report, parse_mode="Markdown")
+    try:
+        asyncio.run(send_update(report))
+    except:
+        pass
 
 # ============================================================
-# MAIN FUNCTION
+# MAIN FUNCTION - POLLING MODE
 # ============================================================
 
-def setup_bot():
-    """Setup and return the bot application"""
+def run_bot():
+    """Run the bot in polling mode"""
+    print("🤖 Starting Telegram bot in POLLING mode...")
+    
+    # Create application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
     # Add handlers
-    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("unban", unban_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    return application
+    print("✅ Bot handlers registered!")
+    print(f"📧 Gmail accounts: {len(GMAIL_ACCOUNTS)}")
+    print(f"📨 Target emails: {len(TARGET_EMAILS)}")
+    print("🚀 Starting polling...")
+    
+    # Start polling (this blocks)
+    application.run_polling(allowed_updates=["message", "callback_query"])
 
 # ============================================================
 # RUN THE APPLICATION
 # ============================================================
 
 if __name__ == "__main__":
-    import threading
-    
-    # Start Telegram bot in background thread
-    def run_bot():
-        print("🤖 Starting Telegram bot...")
-        app_bot = setup_bot()
-        app_bot.run_polling(allowed_updates=["message", "callback_query"])
-    
+    # Start bot in a separate thread
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
     
-    print("✅ Bot started!")
-    print(f"📧 Gmail accounts: {len(GMAIL_ACCOUNTS)}")
-    print(f"📨 Target emails: {len(TARGET_EMAILS)}")
+    print("✅ Bot thread started!")
     
-    # Run Flask app for Railway
+    # Run Flask app for Railway health checks
     port = int(os.environ.get("PORT", 8080))
     print(f"🌐 Starting Flask server on port {port}...")
-    app.run(host="0.0.0.0", port=port)
+    flask_app.run(host="0.0.0.0", port=port)
